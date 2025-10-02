@@ -1,0 +1,39 @@
+task: detect
+mode: train
+model: runs/yolo11/base_train/weights/best.pt
+data:  datasets/10shot/dataset.yaml
+project: runs/yolo11
+name: 10shot_train
+device: 0
+workers: 8
+cache: true
+
+epochs: 500
+batch: 16
+imgsz: 640
+patience: 20
+freeze: 11
+
+optimizer: adamw
+lr0: 0.00001
+lrf: 0.01
+weight_decay: 0.015
+warmup_epochs: 3
+warmup_momentum: 0.8
+warmup_bias_lr: 0.02
+
+degrees: 5.0
+translate: 0.10
+scale: 0.50
+shear: 2.0
+perspective: 0.0005
+hsv_h: 0.015
+hsv_s: 0.70
+hsv_v: 0.70
+mosaic: 1.0
+mixup: 0.15
+copy_paste: 0.30
+fliplr: 0.50
+flipud: 0.00
+close_mosaic: 10                  # taper strong augs in last 10 epochs
+rect: false

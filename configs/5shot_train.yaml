@@ -1,0 +1,34 @@
+task: detect
+mode: train
+model: runs/yolo11/base_train/weights/best.pt
+data:  datasets/5shot/dataset.yaml
+project: runs/yolo11
+name: 5shot_train
+device: 0
+workers: 8
+cache: true
+
+epochs: 100
+batch: 16
+imgsz: 640
+patience: 20
+freeze: 11
+
+optimizer: adamw
+lr0: 0.001
+lrf: 0.01
+weight_decay: 0.015
+warmup_epochs: 2
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+
+mosaic: 0.0
+mixup: 0.0
+copy_paste: 0.0
+degrees: 2
+translate: 0.05
+scale: 0.2
+shear: 1.0
+perspective: 0.0002
+fliplr: 0.5
+flipud: 0.0

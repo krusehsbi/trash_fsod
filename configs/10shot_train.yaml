@@ -9,13 +9,13 @@ workers: 8
 cache: true
 
 epochs: 500
-batch: 16
-imgsz: 640
+batch: 8
+imgsz: 1024
 patience: 20
 freeze: 11
 
 optimizer: adamw
-lr0: 0.00001
+lr0: 0.0001
 lrf: 0.01
 weight_decay: 0.015
 warmup_epochs: 3

@@ -1,0 +1,17 @@
+{
+  "data_root": "../../datasets/syntethic_coco",
+  "out_dir": "runs",
+  "epochs": 20,
+  "batch_size": 8,
+  "lr": 0.02,
+  "momentum": 0.9,
+  "weight_decay": 0.0001,
+  "num_workers": 4,
+  "max_grad_norm": 10.0,
+  "eval_interval": 1,
+  "amp": false,
+  "freeze_backbone": false,
+  "trainable_backbone_layers": 5,
+  "use_cosine_lr": false,
+  "seed": 42
+}

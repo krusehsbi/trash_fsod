@@ -1,3 +1,4 @@
 *.pt
 runs/
+outputs_frcnn/
 datasets/

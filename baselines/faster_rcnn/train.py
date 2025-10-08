@@ -99,7 +99,7 @@ class CocoDetectionTorchvision(Dataset):
 
             self.transform = A.Compose([
                 A.HorizontalFlip(p=0.5),
-                A.RandomResizedCrop(size=(1024, 1024), scale=(0.6, 1.0), ratio=(0.75, 1.33), p=0.3),
+                A.RandomResizedCrop(size=(800, 800), scale=(0.6, 1.0), ratio=(0.75, 1.33), p=0.3),
                 A.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0.8),
                 A.HueSaturationValue(10, 20, 20, p=0.5),
                 A.RGBShift(10, 10, 10, p=0.3),
@@ -213,7 +213,7 @@ def collate_fn(batch):
 def create_model(num_classes: int):
     """Load COCO-pretrained Faster R-CNN and swap the head."""
     backbone = resnet_fpn_backbone('resnet101', weights='DEFAULT', trainable_layers=5)
-    model = FasterRCNN(backbone, num_classes=num_classes)
+    model = FasterRCNN(backbone, num_classes=num_classes, min_size=800, max_size=1024)
 
     in_feats = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_feats, num_classes)

@@ -1,0 +1,26 @@
+{
+  "data_root": "../../datasets/10shot_coco/",
+  "out_dir": "runs/10shot_train/",
+
+  "epochs": 60,
+  "batch_size": 4,
+  "lr": 0.01,
+  "momentum": 0.9,
+  "weight_decay": 0.0005,
+  "num_workers": 4,
+  "max_grad_norm": 5.0,
+  "eval_interval": 1,
+  "amp": true,
+
+  "freeze_backbone": false,
+  "trainable_backbone_layers": 2,
+  "use_cosine_lr": true,
+
+  "early_stop_patience": 4,
+  "early_stop_min_delta": 0.0015,
+
+  "load_from": "runs/base/best.pth",
+  "resume_from": null,
+
+  "augmentation": true
+}

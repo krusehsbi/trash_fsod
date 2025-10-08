@@ -1,6 +1,6 @@
 {
   "data_root": "../../datasets/syntethic_coco",
-  "out_dir": "runs",
+  "out_dir": "runs/base",
   "epochs": 20,
   "batch_size": 8,
   "lr": 0.02,
@@ -13,5 +13,6 @@
   "freeze_backbone": false,
   "trainable_backbone_layers": 5,
   "use_cosine_lr": false,
-  "seed": 42
+  "early_stop_patience": 5,
+  "early_stop_min_delta": 0.0
 }

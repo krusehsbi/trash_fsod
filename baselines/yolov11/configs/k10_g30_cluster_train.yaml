@@ -1,0 +1,62 @@
+# YOLOv11 training config for few-shot + synthetic (k+g) datasets
+# Save as kplusg.yaml and run:
+#   yolo detect train data=/data/yolo/fewshot_plus_g/data.yaml model=yolov11m.pt cfg=kplusg.yaml
+
+# -------------------
+# Train settings
+# -------------------
+task: detect
+mode: train
+model: yolo11m.pt           # COCO-pretrained (or yolo11s.pt if VRAM tight)
+data: ../../datasets/k10_g30_cluster/dataset.yaml
+epochs: 100                # short fine-tuning run
+batch: 8                   # small batch works better for low-data
+imgsz: 1024
+workers: 4
+optimizer: SGD             # SGD usually generalizes better in low-data regimes
+lr0: 0.001                 # start small (default is 0.01)
+lrf: 0.05                  # cosine final LR fraction
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3
+patience: 20
+
+# -------------------
+# Data augmentation
+# -------------------
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 5.0
+translate: 0.1
+scale: 0.3
+shear: 2.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+mosaic: 0.7               # keep mosaic but reduce for stability
+mixup: 0.1
+copy_paste: 0.05
+
+# -------------------
+# Regularization tricks
+# -------------------
+label_smoothing: 0.0
+close_mosaic: 10          # disable mosaic in final 10 epochs
+cache: false              # disable caching to avoid memory spikes
+seed: 42
+save_period: 10
+
+# -------------------
+# Fine-tuning & backbone
+# -------------------
+freeze: 10                # freeze first 10 layers for early stability
+pretrained: true
+resume: false
+
+# -------------------
+# Logging / visualization
+# -------------------
+project: runs/k10_g30_cluster
+name: yolov11_k10_g30_cluster
+exist_ok: true

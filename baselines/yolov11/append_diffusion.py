@@ -309,60 +309,73 @@ def main():
             if not boxes:
                 continue
 
-            for bidx, (cls_id, x1, y1, x2, y2) in enumerate(boxes):
-                # make crop
-                crop = img.crop((x1, y1, x2, y2))
-                bbox_w, bbox_h = crop.size
+            # Create exactly K augmented versions of THIS image.
+            for k in range(args.instances_per_box):
 
-                square_init, off_info, is_small, ctx_box = prep_highres_init(
-                    img, x1, y1, x2, y2,
-                    small_thr=args.small_thr,
-                    gen_target=args.gen_target_small,       # 1024 (SDXL) or 768 (SD1.5)
-                    context_factor=args.context_factor
-                )
+                print(f"[{img_idx+1}/{len(image_paths)}] {rel_path} -> aug k={k}")
 
-                for k in range(args.instances_per_box):
-                    gen_seed = args.seed + img_idx * 10000 + bidx * 100 + k
-                    generator = torch.Generator(device=args.device).manual_seed(gen_seed)
+                gen_seed_base = args.seed + img_idx * 10000 + k * 1000
+                # start from the original each time; we will modify ALL objects into this copy
+                pasted_k = img.copy()
+
+                for bidx, (cls_id, x1, y1, x2, y2) in enumerate(boxes):
+                    # --- prepare init (small-object aware; fall back to your 1024-square if you don't use these helpers) ---
+                    crop = img.crop((x1, y1, x2, y2))
+                    bbox_w, bbox_h = crop.size
+
+                    square_init, off_info, is_small, ctx_box = prep_highres_init(
+                        img, x1, y1, x2, y2,
+                        small_thr=args.small_thr,              # e.g., 64
+                        gen_target=args.gen_target_small,      # e.g., 1024 for SDXL
+                        context_factor=args.context_factor     # e.g., 1.75
+                    )
 
                     # prompts
                     opts = PROMPTS.get(str(cls_id), args.default_prompt)
                     prompt = random.choice(opts) if isinstance(opts, list) else opts
                     neg_prompt = NEG_PROMPT
 
+                    # per-object deterministic seed for this k
+                    generator = torch.Generator(device=args.device).manual_seed(gen_seed_base + bidx)
+
+                    # use lower strength for tiny objects to keep identity
+                    run_strength = min(args.strength, 0.35) if is_small else args.strength
+
+                    # --- generate ---
                     result = pipe(
                         prompt=prompt,
                         image=square_init,
-                        strength=args.strength,
-                        guidance_scale=6.0,
+                        strength=run_strength,
+                        guidance_scale=6.0,          # SDXL sweet spot ~5–7
                         negative_prompt=neg_prompt,
-                        num_inference_steps=50,
+                        num_inference_steps=35,
                         generator=generator,
                     )
                     gen_sq = result.images[0]
+
+                    # map back to bbox size
                     if is_small:
                         gen_region = map_back_highres(gen_sq, off_info, ctx_box, x1, y1, x2, y2)
                     else:
                         gen_region = square_to_bbox_region(gen_sq, off_info, bbox_w, bbox_h)
 
-                    # paste
-                    pasted = img.copy()
+                    # paste into THIS image's Kth variant
                     if args.use_rembg and HAS_REMBG:
                         rgba = remove_bg_rgba(gen_region)
-                        pasted = paste_with_alpha(pasted, rgba, x1, y1)
+                        pasted_k = paste_with_alpha(pasted_k, rgba, x1, y1)
                     else:
-                        pasted.paste(gen_region, (x1, y1))
+                        pasted_k.paste(gen_region, (x1, y1))
 
-                    aug_name = f"{img_path.stem}_aug_b{bidx:02d}_k{k:02d}{img_path.suffix}"
-                    aug_out_path = img_out / rel_path.parent / aug_name
-                    ensure_dir(aug_out_path.parent)
-                    pasted.save(aug_out_path, quality=95)
+                # after all objects are updated, save ONE augmented image for this k
+                aug_name = f"{img_path.stem}_aug_k{k:02d}{img_path.suffix}"
+                aug_out_path = img_out / rel_path.parent / aug_name
+                ensure_dir(aug_out_path.parent)
+                pasted_k.save(aug_out_path, quality=95)
 
-                    # duplicate original labels for augmented image name
-                    if label_path.exists():
-                        with open(label_path, "r") as src, open(lbl_out / (aug_out_path.stem + ".txt"), "w") as dst:
-                            dst.write(src.read())
-
+                # labels unchanged geometrically → copy original with new name
+                if label_path.exists():
+                    with open(label_path, "r") as src, open(lbl_out / (aug_out_path.stem + ".txt"), "w") as dst:
+                        dst.write(src.read())
 
     print(f"\n Augmentation complete!")
     print(f"New dataset written to: {out_root}")

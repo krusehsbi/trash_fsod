@@ -28,6 +28,7 @@ import random
 import numpy as np
 import sys, diffusers, transformers, huggingface_hub, accelerate, torch
 from PIL import Image
+from PIL import ImageFilter
 import json
 
 import torch
@@ -104,6 +105,69 @@ def paste_with_alpha(base_img, overlay_rgba, x1, y1):
     out = Image.alpha_composite(base, tmp)
     return out.convert("RGB")
 
+def _expand_with_context(img, x1, y1, x2, y2, factor=1.75):
+    W, H = img.size
+    w, h = x2 - x1, y2 - y1
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    nw, nh = int(w * factor), int(h * factor)
+    nx1, ny1 = max(0, int(cx - nw / 2)), max(0, int(cy - nh / 2))
+    nx2, ny2 = min(W, int(cx + nw / 2)), min(H, int(cy + nh / 2))
+    return nx1, ny1, nx2, ny2
+
+def prep_highres_init(img, x1, y1, x2, y2, small_thr=64, gen_target=1024, context_factor=1.75):
+    """
+    If bbox short edge < small_thr:
+      - take a context crop around bbox
+      - upscale to gen_target on the long side
+      - pad to square
+    Returns:
+      square_init (PIL), off_info, is_small(bool), ctx_box or None
+    """
+    bw, bh = x2 - x1, y2 - y1
+    short_edge = min(bw, bh)
+    if short_edge >= small_thr:
+        crop = img.crop((x1, y1, x2, y2))
+        square_init, off_info = pil_to_square(crop, target=1024)  # SDXL native
+        return square_init, off_info, False, None
+
+    # small object path
+    ex1, ey1, ex2, ey2 = _expand_with_context(img, x1, y1, x2, y2, factor=context_factor)
+    region = img.crop((ex1, ey1, ex2, ey2))
+    rw, rh = region.size
+    scale = gen_target / max(rw, rh)
+    up_w, up_h = max(64, int(rw * scale)), max(64, int(rh * scale))
+    region_up = region.resize((up_w, up_h), Image.LANCZOS)
+    side = max(up_w, up_h)
+    canvas = Image.new("RGB", (side, side), (255, 255, 255))
+    off_x, off_y = (side - up_w) // 2, (side - up_h) // 2
+    canvas.paste(region_up, (off_x, off_y))
+    off_info = (off_x, off_y, up_w, up_h)
+    return canvas, off_info, True, (ex1, ey1, ex2, ey2)
+
+def map_back_highres(gen_sq, off_info, ctx_box, x1, y1, x2, y2):
+    """
+    Map the generated high-res+context result back to the original bbox size.
+    Returns: gen_region (PIL) with size (bbox_w, bbox_h)
+    """
+    bw, bh = x2 - x1, y2 - y1
+    off_x, off_y, up_w, up_h = off_info
+    ex1, ey1, ex2, ey2 = ctx_box
+
+    # remove square padding
+    region_no_pad = gen_sq.crop((off_x, off_y, off_x + up_w, off_y + up_h))
+
+    # map bbox coords from original context crop -> upscaled region
+    sx = up_w / float(ex2 - ex1 + 1e-6)
+    sy = up_h / float(ey2 - ey1 + 1e-6)
+    rel_x1 = int((x1 - ex1) * sx); rel_y1 = int((y1 - ey1) * sy)
+    rel_x2 = int((x2 - ex1) * sx); rel_y2 = int((y2 - ey1) * sy)
+    rel_x1 = max(0, min(up_w, rel_x1)); rel_y1 = max(0, min(up_h, rel_y1))
+    rel_x2 = max(0, min(up_w, rel_x2)); rel_y2 = max(0, min(up_h, rel_y2))
+
+    gen_region_big = region_no_pad.crop((rel_x1, rel_y1, rel_x2, rel_y2))
+    return gen_region_big.resize((bw, bh), Image.LANCZOS)
+
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -124,6 +188,13 @@ def main():
     parser.add_argument("--negative_prompt", type=str,
                         default="low quality, blurry, text, watermark")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--small_thr", type=int, default=256,
+                    help="If min(bbox_w,bbox_h) < small_thr, use high-res generation path.")
+    parser.add_argument("--gen_target_small", type=int, default=1024,
+                        help="Generation target side for small-object path (use 768 for SD1.5, 1024 for SDXL).")
+    parser.add_argument("--context_factor", type=float, default=1.75,
+                        help="Context expansion factor around small bboxes before upscaling.")
+
     args = parser.parse_args()
 
     if args.prompt_file is not None and Path(args.prompt_file).exists():
@@ -242,8 +313,13 @@ def main():
                 # make crop
                 crop = img.crop((x1, y1, x2, y2))
                 bbox_w, bbox_h = crop.size
-                # SDXL prefers 1024 square init
-                square_init, off_info = pil_to_square(crop, target=1024)
+
+                square_init, off_info, is_small, ctx_box = prep_highres_init(
+                    img, x1, y1, x2, y2,
+                    small_thr=args.small_thr,
+                    gen_target=args.gen_target_small,       # 1024 (SDXL) or 768 (SD1.5)
+                    context_factor=args.context_factor
+                )
 
                 for k in range(args.instances_per_box):
                     gen_seed = args.seed + img_idx * 10000 + bidx * 100 + k
@@ -260,11 +336,14 @@ def main():
                         strength=args.strength,
                         guidance_scale=6.0,
                         negative_prompt=neg_prompt,
-                        num_inference_steps=35,
+                        num_inference_steps=50,
                         generator=generator,
                     )
                     gen_sq = result.images[0]
-                    gen_region = square_to_bbox_region(gen_sq, off_info, bbox_w, bbox_h)
+                    if is_small:
+                        gen_region = map_back_highres(gen_sq, off_info, ctx_box, x1, y1, x2, y2)
+                    else:
+                        gen_region = square_to_bbox_region(gen_sq, off_info, bbox_w, bbox_h)
 
                     # paste
                     pasted = img.copy()

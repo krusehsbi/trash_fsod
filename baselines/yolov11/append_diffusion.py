@@ -285,7 +285,11 @@ def main():
             continue
 
         # ---------- TRAIN AUGMENTATION ----------
-        image_paths = sorted(p for p in img_in.rglob("*") if p.suffix.lower() in [".jpg", ".jpeg", ".png"])
+        # Only include images directly under images/ (ignore subfolders)
+        image_paths = sorted(
+            p for p in img_in.glob("*")
+            if p.is_file() and p.suffix.lower() in [".jpg", ".jpeg", ".png"]
+        )
         print(f"[AUGMENT] {split}: found {len(image_paths)} images to process.")
 
         for img_idx, img_path in enumerate(image_paths):
@@ -339,13 +343,13 @@ def main():
                     generator = torch.Generator(device=args.device).manual_seed(gen_seed_base + bidx)
 
                     # use lower strength for tiny objects to keep identity
-                    run_strength = min(args.strength, 0.35) if is_small else args.strength
+                    #run_strength = min(args.strength, 0.35) if is_small else args.strength
 
                     # --- generate ---
                     result = pipe(
                         prompt=prompt,
                         image=square_init,
-                        strength=run_strength,
+                        strength=args.strength,           
                         guidance_scale=6.0,          # SDXL sweet spot ~5–7
                         negative_prompt=neg_prompt,
                         num_inference_steps=35,

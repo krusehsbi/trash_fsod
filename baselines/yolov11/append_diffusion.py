@@ -14,7 +14,6 @@ Usage:
       --dataset_root /path/to/original_dataset \
       --out_root /path/to/new_augmented_dataset \
       --instances_per_box 3 \
-      --model runwayml/stable-diffusion-v1-5 \
       --use_rembg
 
 Requirements:
@@ -33,6 +32,7 @@ import json
 
 import torch
 from diffusers import StableDiffusionImg2ImgPipeline
+from diffusers import StableDiffusionXLImg2ImgPipeline
 
 try:
     from rembg import remove as rembg_remove
@@ -111,7 +111,6 @@ def main():
                         help="Original YOLO dataset root with images/ and labels/ subfolders.")
     parser.add_argument("--out_root", required=True, type=str,
                         help="Completely new output root directory for augmented dataset.")
-    parser.add_argument("--model", type=str, default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--prompt_file", type=str, default=None, help="Path to JSON file containing class-specific prompts.")
     parser.add_argument("--instances_per_box", type=int, default=2)
@@ -156,16 +155,15 @@ def main():
     ensure_dir(img_out)
     ensure_dir(lbl_out)
 
-    print(f"Loading diffusion pipeline {args.model} ...")
-    pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
+    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         use_safetensors=True,
-        safety_checker=None,         # skip NSFW head entirely
-        feature_extractor=None,      # skip unused extractor
-        low_cpu_mem_usage=False,     # <- important: don't trigger offload path
-        device_map=None              # <- make sure transformers doesn't try to shard/offload
-    ).to("cuda")
+        safety_checker=None,
+        add_watermarker=False,
+        low_cpu_mem_usage=False,
+        device_map=None
+    ).to(args.device)
 
     image_paths = sorted(list(img_in.glob("**/*")))
     image_paths = [p for p in image_paths if p.suffix.lower() in [".jpg", ".jpeg", ".png"]]
@@ -205,14 +203,17 @@ def main():
                 prompt = PROMPTS.get(str(cls_id), args.default_prompt)
                 neg_prompt = NEG_PROMPT
 
+                # when preparing the crop, use 1024 for SDXL:
+                square_init, off_info = pil_to_square(crop, target=1024)
+
 
                 result = pipe(
                     prompt=prompt,
                     image=square_init,
-                    strength=args.strength,
-                    guidance_scale=args.guidance_scale,
+                    strength=args.strength,          
+                    guidance_scale=6.0,              
                     negative_prompt=neg_prompt,
-                    num_inference_steps=30,
+                    num_inference_steps=35,
                     generator=generator,
                 )
                 gen_sq = result.images[0]

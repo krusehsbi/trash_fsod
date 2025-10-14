@@ -165,77 +165,125 @@ def main():
         device_map=None
     ).to(args.device)
 
-    image_paths = sorted(list(img_in.glob("**/*")))
-    image_paths = [p for p in image_paths if p.suffix.lower() in [".jpg", ".jpeg", ".png"]]
+    # ----- split-aware IO setup -----
+    img_in_root = dataset_root / "images"
+    lbl_in_root = dataset_root / "labels"
+    img_out_root = out_root / "images"
+    lbl_out_root = out_root / "labels"
 
-    print(f"Found {len(image_paths)} images to process.")
+    # detect split layout
+    has_splits = any((img_in_root / s).exists() for s in ["train", "val", "test"])
 
-    for img_idx, img_path in enumerate(image_paths):
-        rel_path = img_path.relative_to(img_in)
-        out_img_path = img_out / rel_path
-        out_lbl_path = lbl_out / rel_path.with_suffix(".txt")
-        ensure_dir(out_img_path.parent)
-        ensure_dir(out_lbl_path.parent)
+    def copy_split(src_img_dir: Path, src_lbl_dir: Path, dst_img_dir: Path, dst_lbl_dir: Path):
+        if not src_img_dir.exists():
+            return
+        ensure_dir(dst_img_dir)
+        ensure_dir(dst_lbl_dir)
+        # copy images
+        for p in src_img_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                rel = p.relative_to(src_img_dir)
+                ensure_dir((dst_img_dir / rel).parent)
+                shutil.copy2(p, dst_img_dir / rel)
+                # copy matching label if exists
+                lp = src_lbl_dir / rel.with_suffix(".txt")
+                if lp.exists():
+                    ensure_dir((dst_lbl_dir / rel.with_suffix(".txt")).parent)
+                    shutil.copy2(lp, dst_lbl_dir / rel.with_suffix(".txt"))
 
-        img = Image.open(img_path).convert("RGB")
-        W, H = img.size
-        label_path = lbl_in / rel_path.with_suffix(".txt")
+    # ------------------------------------------------------------
+    # AUGMENT train; COPY val/test (if present). If no splits, augment all.
+    # ------------------------------------------------------------
+    if has_splits:
+        splits = ["train", "val", "test"]
+    else:
+        splits = ["train"]  # treat entire dataset as train (no val/test present)
 
-        boxes = load_yolo_boxes(label_path, W, H)
+    for split in splits:
+        img_in = img_in_root / split if has_splits else img_in_root
+        lbl_in = lbl_in_root / split if has_splits else lbl_in_root
+        img_out = img_out_root / split if has_splits else img_out_root
+        lbl_out = lbl_out_root / split if has_splits else lbl_out_root
 
-        # always copy base image + label
-        shutil.copy2(img_path, out_img_path)
-        if label_path.exists():
-            shutil.copy2(label_path, out_lbl_path)
+        ensure_dir(img_out)
+        ensure_dir(lbl_out)
 
-        if not boxes:
+        if split in ["val", "test"] and has_splits:
+            print(f"[COPY] {split}: copying without augmentation …")
+            copy_split(img_in, lbl_in, img_out, lbl_out)
             continue
 
-        for bidx, (cls_id, x1, y1, x2, y2) in enumerate(boxes):
-            crop = img.crop((x1, y1, x2, y2))
-            bbox_w, bbox_h = crop.size
-            square_init, off_info = pil_to_square(crop, 512)
+        # ---------- TRAIN AUGMENTATION ----------
+        image_paths = sorted(p for p in img_in.rglob("*") if p.suffix.lower() in [".jpg", ".jpeg", ".png"])
+        print(f"[AUGMENT] {split}: found {len(image_paths)} images to process.")
 
-            for k in range(args.instances_per_box):
-                gen_seed = args.seed + img_idx * 10000 + bidx * 100 + k
-                generator = torch.Generator(device=args.device).manual_seed(gen_seed)
+        for img_idx, img_path in enumerate(image_paths):
+            rel_path = img_path.relative_to(img_in)
+            out_img_path = img_out / rel_path
+            out_lbl_path = lbl_out / rel_path.with_suffix(".txt")
+            ensure_dir(out_img_path.parent)
+            ensure_dir(out_lbl_path.parent)
 
-                prompt = PROMPTS.get(str(cls_id), args.default_prompt)
-                neg_prompt = NEG_PROMPT
+            img = Image.open(img_path).convert("RGB")
+            W, H = img.size
+            label_path = lbl_in / rel_path.with_suffix(".txt")
+            boxes = load_yolo_boxes(label_path, W, H)
 
-                # when preparing the crop, use 1024 for SDXL:
+            # always copy base image + label (unaltered)
+            shutil.copy2(img_path, out_img_path)
+            if label_path.exists():
+                ensure_dir(out_lbl_path.parent)
+                shutil.copy2(label_path, out_lbl_path)
+
+            if not boxes:
+                continue
+
+            for bidx, (cls_id, x1, y1, x2, y2) in enumerate(boxes):
+                # make crop
+                crop = img.crop((x1, y1, x2, y2))
+                bbox_w, bbox_h = crop.size
+                # SDXL prefers 1024 square init
                 square_init, off_info = pil_to_square(crop, target=1024)
 
+                for k in range(args.instances_per_box):
+                    gen_seed = args.seed + img_idx * 10000 + bidx * 100 + k
+                    generator = torch.Generator(device=args.device).manual_seed(gen_seed)
 
-                result = pipe(
-                    prompt=prompt,
-                    image=square_init,
-                    strength=args.strength,          
-                    guidance_scale=6.0,              
-                    negative_prompt=neg_prompt,
-                    num_inference_steps=35,
-                    generator=generator,
-                )
-                gen_sq = result.images[0]
-                gen_region = square_to_bbox_region(gen_sq, off_info, bbox_w, bbox_h)
+                    # prompts
+                    opts = PROMPTS.get(str(cls_id), args.default_prompt)
+                    prompt = random.choice(opts) if isinstance(opts, list) else opts
+                    neg_prompt = NEG_PROMPT
 
-                # Paste
-                pasted = img.copy()
-                if args.use_rembg and HAS_REMBG:
-                    rgba = remove_bg_rgba(gen_region)
-                    pasted = paste_with_alpha(pasted, rgba, x1, y1)
-                else:
-                    pasted.paste(gen_region, (x1, y1))
+                    result = pipe(
+                        prompt=prompt,
+                        image=square_init,
+                        strength=args.strength,
+                        guidance_scale=6.0,
+                        negative_prompt=neg_prompt,
+                        num_inference_steps=35,
+                        generator=generator,
+                    )
+                    gen_sq = result.images[0]
+                    gen_region = square_to_bbox_region(gen_sq, off_info, bbox_w, bbox_h)
 
-                aug_name = f"{img_path.stem}_aug_b{bidx:02d}_k{k:02d}{img_path.suffix}"
-                aug_out_path = img_out / rel_path.parent / aug_name
-                ensure_dir(aug_out_path.parent)
-                pasted.save(aug_out_path, quality=95)
+                    # paste
+                    pasted = img.copy()
+                    if args.use_rembg and HAS_REMBG:
+                        rgba = remove_bg_rgba(gen_region)
+                        pasted = paste_with_alpha(pasted, rgba, x1, y1)
+                    else:
+                        pasted.paste(gen_region, (x1, y1))
 
-                # duplicate original labels for augmented image
-                if label_path.exists():
-                    with open(label_path, "r") as src, open(lbl_out / (aug_out_path.stem + ".txt"), "w") as dst:
-                        dst.write(src.read())
+                    aug_name = f"{img_path.stem}_aug_b{bidx:02d}_k{k:02d}{img_path.suffix}"
+                    aug_out_path = img_out / rel_path.parent / aug_name
+                    ensure_dir(aug_out_path.parent)
+                    pasted.save(aug_out_path, quality=95)
+
+                    # duplicate original labels for augmented image name
+                    if label_path.exists():
+                        with open(label_path, "r") as src, open(lbl_out / (aug_out_path.stem + ".txt"), "w") as dst:
+                            dst.write(src.read())
+
 
     print(f"\n Augmentation complete!")
     print(f"New dataset written to: {out_root}")

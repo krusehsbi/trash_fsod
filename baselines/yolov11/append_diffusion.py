@@ -29,6 +29,7 @@ import random
 import numpy as np
 import sys, diffusers, transformers, huggingface_hub, accelerate, torch
 from PIL import Image
+import json
 
 import torch
 from diffusers import StableDiffusionImg2ImgPipeline
@@ -112,6 +113,7 @@ def main():
                         help="Completely new output root directory for augmented dataset.")
     parser.add_argument("--model", type=str, default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--prompt_file", type=str, default=None, help="Path to JSON file containing class-specific prompts.")
     parser.add_argument("--instances_per_box", type=int, default=2)
     parser.add_argument("--strength", type=float, default=0.6)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
@@ -124,6 +126,15 @@ def main():
                         default="low quality, blurry, text, watermark")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+
+    if args.prompt_file is not None and Path(args.prompt_file).exists():
+        with open(args.prompt_file, "r") as f:
+            PROMPTS = json.load(f)
+        NEG_PROMPT = PROMPTS.get("negative", args.negative_prompt)
+        print(f"Loaded {len(PROMPTS)} prompts from {args.prompt_file}")
+    else:
+        PROMPTS = {}
+        NEG_PROMPT = args.negative_prompt
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -191,8 +202,9 @@ def main():
                 gen_seed = args.seed + img_idx * 10000 + bidx * 100 + k
                 generator = torch.Generator(device=args.device).manual_seed(gen_seed)
 
-                prompt = args.default_prompt
-                neg_prompt = args.negative_prompt
+                prompt = PROMPTS.get(str(cls_id), args.default_prompt)
+                neg_prompt = NEG_PROMPT
+
 
                 result = pipe(
                     prompt=prompt,
@@ -229,16 +241,4 @@ def main():
 
 
 if __name__ == "__main__":
-    
-    print("PY:", sys.executable)
-    print("diffusers:", diffusers.__version__)
-    print("transformers:", transformers.__version__)
-    print("huggingface_hub:", huggingface_hub.__version__)
-    print("accelerate:", accelerate.__version__)
-    print("torch:", torch.__version__, "CUDA:", torch.cuda.is_available())
-    import transformers, inspect
-    print("transformers file:", transformers.__file__)
-    from transformers.models.clip.modeling_clip import CLIPTextModel
-    print("CLIPTextModel from:", CLIPTextModel.__module__)
-    print("CLIPTextModel.__init__ args:", CLIPTextModel.__init__.__code__.co_varnames)
     main()

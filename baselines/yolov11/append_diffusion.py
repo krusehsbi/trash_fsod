@@ -47,6 +47,7 @@ def ensure_dir(path: Path):
 
 
 def load_yolo_boxes(label_path, img_w, img_h):
+    MIN_SIDE = 2  # pixels
     boxes = []
     if not os.path.exists(label_path):
         return boxes
@@ -57,17 +58,15 @@ def load_yolo_boxes(label_path, img_w, img_h):
                 continue
             cls, cx, cy, w, h = map(float, parts)
             cls = int(cls)
-            cx *= img_w
-            cy *= img_h
-            w *= img_w
-            h *= img_h
+            cx *= img_w; cy *= img_h; w *= img_w; h *= img_h
             x1 = max(0, int(cx - w / 2))
             y1 = max(0, int(cy - h / 2))
             x2 = min(img_w, int(cx + w / 2))
             y2 = min(img_h, int(cy + h / 2))
-            boxes.append((cls, x1, y1, x2, y2))
+            # drop invalid / tiny boxes
+            if x2 - x1 >= MIN_SIDE and y2 - y1 >= MIN_SIDE:
+                boxes.append((cls, x1, y1, x2, y2))
     return boxes
-
 
 def pil_to_square(pil_img, target=512, pad_color=(255, 255, 255)):
     w, h = pil_img.size
@@ -310,6 +309,7 @@ def main():
                 ensure_dir(out_lbl_path.parent)
                 shutil.copy2(label_path, out_lbl_path)
 
+            boxes = [(c, x1, y1, x2, y2) for (c, x1, y1, x2, y2) in boxes if x2 > x1 and y2 > y1]
             if not boxes:
                 continue
 

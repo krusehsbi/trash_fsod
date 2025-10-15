@@ -1,11 +1,11 @@
 {
-  "0": "a crumpled plastic bag or food wrapper littered on asphalt, dirty and wrinkled, partially transparent, photorealistic daylight photo, shallow depth of field, natural environment",
+  "0": "a crumpled plastic bag or food wrapper littered on asphalt, slightly dirty, wrinkled, partially transparent, photorealistic daylight photo, shallow depth of field, natural environment",
   "1": "a discarded cigarette butt lying on concrete, with ashes and burn marks, macro photo, natural lighting, realistic shadows, outdoor environment, photorealistic",
-  "2": "an empty plastic bottle discarded outdoors, scuffed and dirty, lying on grass or road, realistic reflections, transparent PET plastic, daylight photo, photorealistic",
-  "3": "a close-up of a bottle cap lying on the ground, scratched and weathered, on concrete or sand, macro photo, natural sunlight, realistic texture and shadows",
-  "4": "a crushed aluminum drink can littered on the ground, scratched paint, reflections, photorealistic outdoor photo, daylight, high detail, real texture",
-  "5": "a small piece of broken plastic waste on the ground outdoors, irregular shape, dirty and weathered, photorealistic daylight photo, shallow depth of field, real shadows",
-  "6": "a flattened cardboard carton or paper packaging littered on the street, damp and wrinkled, showing dirt and water stains, photorealistic outdoor photo, daylight",
-  "7": "a discarded paper or plastic cup on the ground outdoors, dirty and stained, lying sideways, photorealistic lighting, depth of field, daylight, real shadows",
+  "2": "an empty plastic or glass bottle discarded outdoors, scuffed and dirty, lying on grass or road, realistic reflections, transparent PET plastic or glass, daylight photo, photorealistic",
+  "3": "a close-up of a bottle cap lying on the ground, scratched and weathered, on concrete or sand, macro photo, natural sunlight, realistic texture and shadows, metal material, bent",
+  "4": "a crushed aluminum drink can or tin can littered on the ground, scratched paint, different labels, metal material, reflections, photorealistic outdoor photo, daylight, high detail, real texture",
+  "5": "a small piece of broken plastic waste on the ground outdoors, irregular shape, dirty and weathered, broken of part of a bigger plastic piece, photorealistic daylight photo, shallow depth of field, real shadows",
+  "6": "a flattened cardboard carton or paper packaging littered on the street, plain carton packaging or food packaging made of carton with print on whole surface, damp and wrinkled, showing dirt and water stains, photorealistic outdoor photo, daylight",
+  "7": "a discarded paper or plastic cup on the ground outdoors, crumpled, coffee stains, damp, dirty and stained, photorealistic lighting, depth of field, daylight, real shadows",
   "negative": "low quality, low resolution, blurry, cartoon, CGI, painting, render, unrealistic, text, logo, watermark, people, animals, hands, trash bin, recycling icon"
 }

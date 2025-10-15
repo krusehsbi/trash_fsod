@@ -34,6 +34,7 @@ import json
 import torch
 from diffusers import StableDiffusionImg2ImgPipeline
 from diffusers import StableDiffusionXLImg2ImgPipeline
+from diffusers import DPMSolverMultistepScheduler
 
 try:
     from rembg import remove as rembg_remove
@@ -191,7 +192,7 @@ def main():
                     help="If min(bbox_w,bbox_h) < small_thr, use high-res generation path.")
     parser.add_argument("--gen_target_small", type=int, default=1024,
                         help="Generation target side for small-object path (use 768 for SD1.5, 1024 for SDXL).")
-    parser.add_argument("--context_factor", type=float, default=1.75,
+    parser.add_argument("--context_factor", type=float, default=1.5,
                         help="Context expansion factor around small bboxes before upscaling.")
 
     args = parser.parse_args()
@@ -234,6 +235,8 @@ def main():
         low_cpu_mem_usage=False,
         device_map=None
     ).to(args.device)
+
+    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
 
     # ----- split-aware IO setup -----
     img_in_root = dataset_root / "images"
@@ -349,8 +352,9 @@ def main():
                     result = pipe(
                         prompt=prompt,
                         image=square_init,
-                        strength=args.strength,           
-                        guidance_scale=6.0,          # SDXL sweet spot ~5–7
+                        strength=args.strength,
+                        guidance_scale=args.guidance_scale,          # SDXL sweet spot ~5–7
+                        #guidance_rescale=6.0,
                         negative_prompt=neg_prompt,
                         num_inference_steps=35,
                         generator=generator,

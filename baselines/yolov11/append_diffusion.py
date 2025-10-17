@@ -31,6 +31,8 @@ from PIL import Image
 from PIL import ImageFilter
 import json
 
+from PIL import ImageOps
+
 import torch
 from diffusers import StableDiffusionImg2ImgPipeline
 from diffusers import StableDiffusionXLImg2ImgPipeline
@@ -287,10 +289,10 @@ def main():
             continue
 
         # ---------- TRAIN AUGMENTATION ----------
-        # Only include images directly under images/ (ignore subfolders)
+        # Include images in subfolders
         image_paths = sorted(
-            p for p in img_in.glob("*")
-            if p.is_file() and p.suffix.lower() in [".jpg", ".jpeg", ".png"]
+            p for p in img_in.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
         )
         print(f"[AUGMENT] {split}: found {len(image_paths)} images to process.")
 
@@ -301,7 +303,7 @@ def main():
             ensure_dir(out_img_path.parent)
             ensure_dir(out_lbl_path.parent)
 
-            img = Image.open(img_path).convert("RGB")
+            img = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
             W, H = img.size
             label_path = lbl_in / rel_path.with_suffix(".txt")
             boxes = load_yolo_boxes(label_path, W, H)

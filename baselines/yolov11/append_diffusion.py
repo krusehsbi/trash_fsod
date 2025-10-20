@@ -384,8 +384,11 @@ def main():
 
                 # labels unchanged geometrically → copy original with new name
                 if label_path.exists():
-                    with open(label_path, "r") as src, open(lbl_out / (aug_out_path.stem + ".txt"), "w") as dst:
+                    label_out_path = lbl_out / rel_path.parent / f"{aug_out_path.stem}.txt"
+                    ensure_dir(label_out_path.parent)
+                    with open(label_path, "r") as src, open(label_out_path, "w") as dst:
                         dst.write(src.read())
+
 
     print(f"\n Augmentation complete!")
     print(f"New dataset written to: {out_root}")

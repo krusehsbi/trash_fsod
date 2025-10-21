@@ -126,7 +126,8 @@ def embed_instances(items: List[Dict], model, preprocess, device: str, max_insta
                 feat = model.encode_image(image_input)
                 feat = feat / feat.norm(dim=-1, keepdim=True)
                 embs.append(feat.cpu())
-                metas.append({"image": str(item["image"]), "class": int(cls)})
+                # store bbox so we can save *cropped* images later
+                metas.append({"image": str(item["image"]), "class": int(cls), "bbox": (x1, y1, x2, y2)})
             if len(metas) >= max_instances:
                 break
     if not embs:
@@ -223,20 +224,31 @@ def parse_args():
 def main():
     args = parse_args()
     root = Path(args.root)
-    items = collect_instances(root, args.images_subdir, args.labels_subdir, args.split, args.classes, args.respect_subfolders)
+
+    # --- Collect and embed instances ---
+    items = collect_instances(
+        root, args.images_subdir, args.labels_subdir,
+        args.split, args.classes, args.respect_subfolders
+    )
     if not items:
-        print("No items found."); sys.exit(1)
+        print("No items found.")
+        sys.exit(1)
+
     model, preprocess = load_clip(args.model, args.device)
     X, metas = embed_instances(items, model, preprocess, args.device, args.max_instances, args.pad_frac)
     Z = reduce_to_2d(X, args.reduction, args.seed)
     class_names = read_names(root)
+
+    # --- Optional clustering ---
     cluster_labels = None
     if args.cluster and args.cluster > 0:
         kmeans = KMeans(n_clusters=args.cluster, random_state=args.seed, n_init=10)
         cluster_labels = kmeans.fit_predict(Z)
+
+    # --- Plot embedding scatter (with ellipses) ---
     plot_embeddings(
         Z, metas, Path(args.output), class_names,
-        "Distribution of CLIP-Embeddings for Class Plastic bag & wrapper in Synthetic Dataset",
+        "Distribution of CLIP-Embeddings for Class `Plastic bag & wrapper`",
         cluster_labels=cluster_labels
     )
 
@@ -250,8 +262,54 @@ def main():
             cluster_to_files[int(lbl)].append(str(path))
 
         for k in sorted(cluster_to_files):
+            print(f"--- Cluster {k} ---")
             for fname in sorted(cluster_to_files[k]):
                 print(f"  {fname}")
+
+    # --- Save a few random cropped examples per cluster ---
+    if cluster_labels is not None:
+        from PIL import Image
+        import random
+        rng = random.Random(args.seed)
+        n_samples = 10  # how many examples to save per cluster
+
+        out_dir = Path(args.output).with_name(Path(args.output).stem + "_clusters")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nSaving up to {n_samples} cropped examples per cluster in: {out_dir}")
+
+        # group indices by cluster
+        from collections import defaultdict
+        cluster_to_indices = defaultdict(list)
+        for i, lbl in enumerate(cluster_labels):
+            cluster_to_indices[int(lbl)].append(i)
+
+        for k, idxs in sorted(cluster_to_indices.items()):
+            if not idxs:
+                continue
+            chosen = rng.sample(idxs, min(n_samples, len(idxs)))
+            cluster_dir = out_dir / f"cluster_{k}"
+            cluster_dir.mkdir(exist_ok=True)
+
+            for j, i in enumerate(chosen):
+                meta = metas[i]
+                img_path = Path(meta["image"])
+                bbox = meta.get("bbox")
+                if not bbox:
+                    print(f"  [warn] no bbox for {img_path}, skipping")
+                    continue
+                x1, y1, x2, y2 = map(int, bbox)
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                except Exception as e:
+                    print(f"  [warn] failed to open {img_path}: {e}")
+                    continue
+                crop = img.crop((x1, y1, x2, y2))
+                save_name = f"{img_path.stem}_c{k}_{j}.jpg"
+                crop.save(cluster_dir / save_name, quality=95)
+
+        print("Done saving cropped examples.")
+
+
 
 
 if __name__ == "__main__":

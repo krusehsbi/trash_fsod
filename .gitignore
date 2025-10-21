@@ -2,3 +2,7 @@
 runs/
 outputs_frcnn/
 datasets/
+clip_embeddings_clustered_clusters/
+clip_embeddings_clustered.png
+clip_embeddings.png
+coco_clip_embeddings.png

@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
-    img_paths = list(Path(args.img_dir).rglob("*.jpg"))
+    img_paths = list(Path(args.img_dir).rglob("*.jpg")) + list(Path(args.img_dir).rglob("*.JPG"))
     for img_path in img_paths:
         lbl_path = Path(args.lbl_dir) / img_path.with_suffix(".txt").name
         crop_yolo(img_path, lbl_path, args.out_dir)

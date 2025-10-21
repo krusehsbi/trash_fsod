@@ -248,7 +248,7 @@ def main():
     # --- Plot embedding scatter (with ellipses) ---
     plot_embeddings(
         Z, metas, Path(args.output), class_names,
-        "Distribution of CLIP-Embeddings for Class `Plastic bag & wrapper`",
+        "Distribution of CLIP-Embeddings for Class `Plastic bag & wrapper` in Synthetic Dataset",
         cluster_labels=cluster_labels
     )
 

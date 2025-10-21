@@ -11,6 +11,7 @@ import csv
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from sklearn.cluster import KMeans
 
 import numpy as np
 from PIL import Image
@@ -153,7 +154,7 @@ def build_colors(num_classes: int):
         color_list += color_list
     return color_list[:num_classes]
 
-def plot_embeddings(Z, metas, out_path, class_names, title):
+def plot_embeddings(Z, metas, out_path, class_names, title, cluster_labels=None):
     import matplotlib.pyplot as plt
     classes = np.array([m["class"] for m in metas], int)
     num_classes = int(classes.max()) + 1 if classes.size else 0
@@ -164,12 +165,41 @@ def plot_embeddings(Z, metas, out_path, class_names, title):
         mask = classes == c
         label = class_names[c] if (class_names and c < len(class_names)) else f"class {c}"
         plt.scatter(Z[mask, 0], Z[mask, 1], s=12, alpha=0.8, label=label)
+    # Overlay cluster “circles” if requested
+    ax = plt.gca()
+    if cluster_labels is not None:
+        _draw_cluster_ellipses(ax, Z, cluster_labels, n_std=2.0, lw=2.0)
     #plt.legend(frameon=False)
     plt.xlabel("Dim 1"); plt.ylabel("Dim 2"); plt.title(title)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path)
     print(f"Saved plot to {out_path}")
+
+def _draw_cluster_ellipses(ax, Z, labels, n_std=2.0, lw=2.0):
+    """Draw Gaussian ellipses around each cluster."""
+    import numpy as np
+    from matplotlib.patches import Ellipse
+    for k in np.unique(labels):
+        pts = Z[labels == k]
+        if pts.shape[0] < 2:
+            continue
+        mu = pts.mean(axis=0)
+        # covariance + eigendecomp for ellipse params
+        cov = np.cov(pts.T)
+        vals, vecs = np.linalg.eigh(cov)
+        order = vals.argsort()[::-1]
+        vals, vecs = vals[order], vecs[:, order]
+        # width/height = 2 * n_std * sqrt(eigvals)
+        width, height = 2 * n_std * np.sqrt(np.maximum(vals, 1e-12))
+        angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+        e = Ellipse(xy=mu, width=width, height=height, angle=angle,
+                    facecolor="none", edgecolor="black", linewidth=lw, alpha=0.9)
+        ax.add_patch(e)
+        ax.text(mu[0], mu[1], f"C{k}", ha="center", va="center",
+                fontsize=9, weight="bold", color="black",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="black", lw=0.6, alpha=0.7))
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -186,6 +216,8 @@ def parse_args():
     p.add_argument("--output", default="clip_embeddings.png")
     p.add_argument("--classes", nargs="*", type=int, default=None, help="List of class IDs to keep.")
     p.add_argument("--respect-subfolders", action="store_true", help="Respect original subfolder structure when locating images.")
+    p.add_argument("--cluster", type=int, default=0, metavar="K",
+                   help="If > 0, run K-means with K clusters on the 2D embedding and circle each cluster.")
     return p.parse_args()
 
 def main():
@@ -198,7 +230,29 @@ def main():
     X, metas = embed_instances(items, model, preprocess, args.device, args.max_instances, args.pad_frac)
     Z = reduce_to_2d(X, args.reduction, args.seed)
     class_names = read_names(root)
-    plot_embeddings(Z, metas, Path(args.output), class_names, "Distribution of CLIP-Embeddings for Class Plastic bag & wrapper in Synthetic Dataset")
+    cluster_labels = None
+    if args.cluster and args.cluster > 0:
+        kmeans = KMeans(n_clusters=args.cluster, random_state=args.seed, n_init=10)
+        cluster_labels = kmeans.fit_predict(Z)
+    plot_embeddings(
+        Z, metas, Path(args.output), class_names,
+        "Distribution of CLIP-Embeddings for Class Plastic bag & wrapper in Synthetic Dataset",
+        cluster_labels=cluster_labels
+    )
+
+    # --- Print file names grouped by cluster ---
+    if cluster_labels is not None:
+        print("\n=== Clustered file names ===")
+        from collections import defaultdict
+        cluster_to_files = defaultdict(list)
+        for lbl, meta in zip(cluster_labels, metas):
+            path = meta.get("image")
+            cluster_to_files[int(lbl)].append(str(path))
+
+        for k in sorted(cluster_to_files):
+            for fname in sorted(cluster_to_files[k]):
+                print(f"  {fname}")
+
 
 if __name__ == "__main__":
     main()

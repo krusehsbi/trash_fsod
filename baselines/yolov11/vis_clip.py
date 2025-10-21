@@ -198,7 +198,7 @@ def main():
     X, metas = embed_instances(items, model, preprocess, args.device, args.max_instances, args.pad_frac)
     Z = reduce_to_2d(X, args.reduction, args.seed)
     class_names = read_names(root)
-    plot_embeddings(Z, metas, Path(args.output), class_names, "CLIP Embeddings")
+    plot_embeddings(Z, metas, Path(args.output), class_names, "Distribution of CLIP-Embeddings for Class Plastic bag & wrapper in Synthetic Dataset")
 
 if __name__ == "__main__":
     main()

@@ -214,7 +214,7 @@ def main():
     Z = reduce_to_2d(X, args.reduction, args.seed)
 
     supercat_list = list(super2id.keys())
-    plot_embeddings(Z, metas, Path(args.output), supercat_list, 'COCO Instance CLIP Embeddings (Supercategories)')
+    plot_embeddings(Z, metas, Path(args.output), supercat_list, 'Distribution of CLIP-Embeddings for Class Plastic bag & wrapper in TACO')
 
 if __name__ == '__main__':
     main()

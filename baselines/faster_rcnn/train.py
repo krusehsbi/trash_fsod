@@ -1,444 +1,250 @@
 #!/usr/bin/env python3
 """
-Faster R-CNN finetuning on a COCO-style dataset, driven by a config file.
+Train Faster R-CNN on a YOLO-format dataset (YOLO folder or data YAML).
 
-- Trains on TRAIN, validates on VAL each epoch; keeps best.pth by val mAP
-- After training, reloads best.pth and evaluates on TEST
-- Loads settings from --config (JSON or YAML)
-- Optionally loads a base checkpoint (load_from) or resumes (resume_from)
-- If class count differs when loading a base checkpoint, ROI head weights are ignored safely
+Usage
+-----
+python train_frcnn_from_yolo.py \
+    --data /path/to/yolo_root_or_dataset.yaml \
+    --out runs/frcnn-5shot
+
+Edit the hyperparameters in the CONFIG section below as desired.
 """
-
+from __future__ import annotations
+import argparse
+import os
 from pathlib import Path
-import argparse, json, random
-import torch, torchvision, torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from typing import List, Dict, Tuple, Optional
+import time
+import yaml
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import functional as F
+from torchvision import transforms
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision import transforms as T
-from pycocotools.coco import COCO
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from tqdm import tqdm
 from PIL import Image
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-import numpy as np
-from torchvision.models.detection import FasterRCNN
-from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
-# ---------------------- Config loading ----------------------
-def load_config(cfg_path: str) -> dict:
-    p = Path(cfg_path)
-    if not p.exists():
-        raise FileNotFoundError(f"Config file not found: {p}")
-    if p.suffix.lower() in [".yml", ".yaml"]:
-        try:
-            import yaml
-        except Exception as e:
-            raise RuntimeError("PyYAML not installed. pip install pyyaml") from e
-        return yaml.safe_load(p.read_text(encoding="utf-8"))
-    else:
-        return json.loads(p.read_text(encoding="utf-8"))
 
-parser = argparse.ArgumentParser(description="Faster R-CNN base training (config-driven)")
-parser.add_argument("--config", required=True, help="Path to config .json/.yaml")
-args = parser.parse_args()
-CFG = load_config(args.config)
+# ==============================
+# CONFIG — edit these variables
+# ==============================
+EPOCHS: int = 100
+BATCH: int = 4
+IMG_SIZE: int = 1024
+WORKERS: int = 4
+OPTIMIZER: str = "SGD"
+LR0: float = 0.001
+MOMENTUM: float = 0.937
+WEIGHT_DECAY: float = 5e-4
+LRF: float = 0.05
+FREEZE: int = 0
+PRETRAINED: bool = True
+USE_AMP: bool = True
+COLOR_JITTER: bool = False
+SEED: int = 42
+# Early stopping
+EARLY_STOPPING_PATIENCE: int = 20
+EARLY_STOPPING_MIN_DELTA: float = 1e-4
+# ==============================
 
-# ---------------------- Paths & hyperparams ----------------------
-DATA_ROOT = Path(CFG["data_root"]).resolve()
-TRAIN_IMG_DIR = DATA_ROOT / "images/train"
-VAL_IMG_DIR   = DATA_ROOT / "images/val"
-TEST_IMG_DIR  = DATA_ROOT / "images/test"
-
-TRAIN_JSON = DATA_ROOT / "annotations/instances_train.json"
-VAL_JSON   = DATA_ROOT / "annotations/instances_val.json"
-TEST_JSON  = DATA_ROOT / "annotations/instances_test.json"
-
-OUT_DIR = Path(CFG.get("out_dir", "runs")).resolve()
-SEED = int(CFG.get("seed", 1337))
-EPOCHS = int(CFG.get("epochs", 20))
-BATCH_SIZE = int(CFG.get("batch_size", 8))
-LR = float(CFG.get("lr", 0.02))
-MOMENTUM = float(CFG.get("momentum", 0.9))
-WEIGHT_DECAY = float(CFG.get("weight_decay", 1e-4))
-NUM_WORKERS = int(CFG.get("num_workers", 4))
-MAX_GRAD_NORM = float(CFG.get("max_grad_norm", 10.0))
-EVAL_INTERVAL = int(CFG.get("eval_interval", 1))
-AMP = bool(CFG.get("amp", False))
-FREEZE_BACKBONE = bool(CFG.get("freeze_backbone", False))
-TRAINABLE_BACKBONE_LAYERS = int(CFG.get("trainable_backbone_layers", 3))
-USE_COSINE_LR = bool(CFG.get("use_cosine_lr", False))
-EARLY_STOP_PATIENCE = int(CFG.get("early_stop_patience", 0))   # 0 disables
-EARLY_STOP_MIN_DELTA = float(CFG.get("early_stop_min_delta", 0.0))
-
-# Checkpoint behavior
-LOAD_FROM = CFG.get("load_from", None)      # load weights only (good for finetune)
-RESUME_FROM = CFG.get("resume_from", None)  # resume training (model + optimizer + epoch)
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# ============================================================
-# -------------------- DATASET CLASS -------------------------
-# ============================================================
-
-class CocoDetectionTorchvision(Dataset):
-    def __init__(self, img_dir: Path, ann_file: Path, train: bool = True):
-        self.coco = COCO(str(ann_file))
-        self.img_dir = Path(img_dir)
-        self.ids = list(sorted(self.coco.getImgIds()))
-        if train:
-            self.ids = [i for i in self.ids if len(self.coco.getAnnIds(imgIds=i, iscrowd=None)) > 0]
-
-        cats = self.coco.loadCats(self.coco.getCatIds())
-        self.catid2contig = {int(c["id"]): i + 1 for i, c in enumerate(sorted(cats, key=lambda x: int(x["id"])))} 
-        self.num_classes = len(self.catid2contig) + 1
-
-        self.train = train
-        self.use_aug = bool(CFG.get("augmentation", False)) and train
-
-        if self.use_aug:
-
-            self.transform = A.Compose([
-                A.HorizontalFlip(p=0.5),
-                A.RandomResizedCrop(size=(800, 800), scale=(0.6, 1.0), ratio=(0.75, 1.33), p=0.3),
-                A.ColorJitter(0.3, 0.3, 0.3, 0.1, p=0.8),
-                A.HueSaturationValue(10, 20, 20, p=0.5),
-                A.RGBShift(10, 10, 10, p=0.3),
-                A.OneOf([A.Blur(3, p=1.0), A.GaussNoise(var_limit=(5.0, 20.0), p=1.0)], p=0.2),
-                A.ToFloat(max_value=255.0),     # images -> float32 in [0,1]
-                ToTensorV2()
-            ], bbox_params=A.BboxParams(
-                format="pascal_voc",            # [xmin, ymin, xmax, ymax] in PIXELS
-                label_fields=["labels"],        # labels are provided separately
-                min_visibility=0.2,
-                check_each_transform=True       # stricter validation, useful for debugging
-            ))
-        else:
-            self.transform = T.Compose([T.ToTensor()])
-
-    def __len__(self):
-        return len(self.ids)
-
-    def __getitem__(self, index):
-        img_id = self.ids[index]
-        ann_ids = self.coco.getAnnIds(imgIds=img_id, iscrowd=None)
-        anns = self.coco.loadAnns(ann_ids)
-        path = self.coco.loadImgs(img_id)[0]["file_name"]
-        img = Image.open(self.img_dir / path).convert("RGB")
-
-        boxes, labels, areas, iscrowd = [], [], [], []
-        for ann in anns:
-            xmin, ymin, w, h = ann["bbox"]
-            boxes.append([xmin, ymin, xmin + w, ymin + h])
-            labels.append(self.catid2contig[ann["category_id"]])
-            areas.append(w * h)
-            iscrowd.append(ann.get("iscrowd", 0))
-
-        boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        labels = torch.as_tensor(labels, dtype=torch.int64)
-        areas = torch.as_tensor(areas, dtype=torch.float32)
-        iscrowd = torch.as_tensor(iscrowd, dtype=torch.int64)
-
-        W, H = img.size  # PIL gives (W, H)
-
-        if boxes.numel():
-            # clamp into image bounds
-            boxes[:, 0::2] = boxes[:, 0::2].clamp(min=0, max=W - 1e-3)  # x1,x2
-            boxes[:, 1::2] = boxes[:, 1::2].clamp(min=0, max=H - 1e-3)  # y1,y2
-
-            # drop boxes that lost validity
-            keep = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
-            boxes, labels, areas, iscrowd = boxes[keep], labels[keep], areas[keep], iscrowd[keep]
-        W, H = img.size  # PIL gives (W, H)
-
-        if boxes.numel():
-            # clamp into image bounds
-            boxes[:, 0::2] = boxes[:, 0::2].clamp(min=0, max=W - 1e-3)  # x1,x2
-            boxes[:, 1::2] = boxes[:, 1::2].clamp(min=0, max=H - 1e-3)  # y1,y2
-
-            # drop boxes that lost validity
-            keep = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
-            boxes, labels, areas, iscrowd = boxes[keep], labels[keep], areas[keep], iscrowd[keep]
-
-        # initial target
-        target = {
-            "boxes": boxes,
-            "labels": labels,
-            "image_id": torch.tensor([img_id]),
-            "area": areas,
-            "iscrowd": iscrowd,
-        }
-
-        # --- apply strong augmentation ---
-        if self.use_aug:
-            img_np = np.array(img)  # HWC, uint8
-            bxs_list = boxes.tolist()
-            lbs_list = labels.tolist()
-
-            transformed = self.transform(
-                image=img_np, 
-                bboxes=bxs_list, 
-                labels=lbs_list
-            )
-
-            img_t = transformed["image"]
-            bxs_t = torch.tensor(transformed["bboxes"], dtype=torch.float32)
-            lbs_t = torch.tensor(transformed["labels"], dtype=torch.int64)
-
-            if bxs_t.numel() == 0:
-                bxs_t = torch.zeros((0, 4), dtype=torch.float32)
-                lbs_t = torch.zeros((0,), dtype=torch.int64)
-
-            target["boxes"] = bxs_t
-            target["labels"] = lbs_t
-            target["area"] = (
-                (bxs_t[:, 2] - bxs_t[:, 0]).clamp(min=0) *
-                (bxs_t[:, 3] - bxs_t[:, 1]).clamp(min=0)
-            )
-            img = img_t
-        else:
-            # no augmentation -> plain ToTensor()
-            img = self.transform(img)
-
-        return img, target
-
-
-
-def collate_fn(batch):
-    return tuple(zip(*batch))
-
-# ============================================================
-# ---------------------- MODEL -------------------------------
-# ============================================================
-
-def create_model(num_classes: int):
-    """Load COCO-pretrained Faster R-CNN and swap the head."""
-    backbone = resnet_fpn_backbone('resnet101', weights='DEFAULT', trainable_layers=5)
-    model = FasterRCNN(backbone, num_classes=num_classes, min_size=800, max_size=1024)
-
-    in_feats = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_feats, num_classes)
-    if FREEZE_BACKBONE:
-        for p in model.backbone.parameters():
-            p.requires_grad = False
-    return model
-
-# ============================================================
-# -------------------- TRAINING UTILS ------------------------
-# ============================================================
-
-def set_seed(seed: int):
+def set_seed(seed: int = 42):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def save_ckpt(path: Path, model, optimizer, epoch: int, best_map: float):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "epoch": epoch,
-        "best_map": best_map,
-    }, str(path))
+def yolo_denorm_to_xyxy(xc, yc, w, h, W, H):
+    x = (xc - w / 2.0) * W
+    y = (yc - h / 2.0) * H
+    x2 = (xc + w / 2.0) * W
+    y2 = (yc + h / 2.0) * H
+    return max(0, x), max(0, y), min(W, x2), min(H, y2)
 
-def load_ckpt_flex(model, ckpt_path: Path, load_optimizer=False, optimizer=None):
-    """
-    Load a checkpoint and ignore ROI head keys if shapes mismatch
-    (useful for finetuning on different class counts).
-    """
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
-    state = ckpt.get("model", ckpt)  # support pure state_dict too
+class YoloDetectionDataset(Dataset):
+    def __init__(self, images_dir: Path, labels_dir: Path, class_names: List[str], max_size=None, train=False, enable_color_jitter=False):
+        self.images = sorted([p for p in images_dir.rglob('*') if p.suffix.lower() in {'.jpg', '.jpeg', '.png'}])
+        self.images_dir = images_dir  # preserve root to compute relative paths for labels
+        self.labels_dir = labels_dir
+        self.class_names = class_names
+        self.max_size = max_size
+        self.train = train
+        self.enable_color_jitter = enable_color_jitter
+        self.flip = transforms.RandomHorizontalFlip(0.5) if train else None
+        self.color = transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02) if (train and enable_color_jitter) else None
 
-    # Drop ROI head keys — safest when num_classes changed
-    drop_prefixes = [
-        "roi_heads.box_predictor.cls_score",
-        "roi_heads.box_predictor.bbox_pred",
-    ]
-    filtered = {}
-    for k, v in state.items():
-        if any(k.startswith(pref) for pref in drop_prefixes):
-            continue
-        # if target shape does not match, skip
-        if k in model.state_dict() and model.state_dict()[k].shape != v.shape:
-            continue
-        filtered[k] = v
+    def __len__(self):
+        return len(self.images)
 
-    missing, unexpected = model.load_state_dict(filtered, strict=False)
-    print(f"[load_ckpt_flex] loaded: {len(filtered)} keys; missing={len(missing)} unexpected={len(unexpected)}")
+    def _load_targets(self, img_path: Path, W: int, H: int):
+        # preserve subfolder structure: map images/<subdirs>/img.jpg -> labels/<subdirs>/img.txt
+        try:
+            rel = img_path.relative_to(self.images_dir)
+            label_path = (self.labels_dir / rel).with_suffix('.txt')
+        except Exception:
+            # fallback: same-dir label file or labels root with filename
+            label_path = self.labels_dir / img_path.with_suffix('.txt').name
+        boxes, raw_labels = [], []
+        if label_path.exists():
+            for line in open(label_path):
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                cls, xc, yc, w, h = int(parts[0]), *map(float, parts[1:])
+                boxes.append(yolo_denorm_to_xyxy(xc, yc, w, h, W, H))
+                raw_labels.append(cls)
+        # Normalize class indices: detect 1-based files and convert to 0-based
+        labels = []
+        if raw_labels:
+            max_lbl = max(raw_labels)
+            if max_lbl >= len(self.class_names):
+                # assume 1-based -> convert all to 0-based
+                raw_labels = [r - 1 for r in raw_labels]
+            labels = [r + 1 for r in raw_labels]  # torchvision expects 1..C (0 is background)
+        boxes = torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32)
+        labels = torch.tensor(labels, dtype=torch.int64) if labels else torch.zeros((0,), dtype=torch.int64)
+        area = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+        iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
+        return {"boxes": boxes, "labels": labels, "area": area, "iscrowd": iscrowd}
 
-    start_epoch = -1
-    best_map = -1.0
-    if load_optimizer and optimizer is not None and "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
-        start_epoch = int(ckpt.get("epoch", -1))
-        best_map = float(ckpt.get("best_map", -1.0))
-    return start_epoch, best_map
+    def __getitem__(self, idx: int):
+        img_path = self.images[idx]
+        image = Image.open(img_path).convert('RGB')
+        W, H = image.size
+        target = self._load_targets(img_path, W, H)
+        target["image_id"] = torch.tensor([idx])
+        if self.train and self.color:
+            image = self.color(image)
+        if self.train and self.flip:
+            if random.random() < 0.5:
+                image = F.hflip(image)
+                if target["boxes"].numel() > 0:
+                    boxes = target["boxes"].clone()
+                    boxes[:, [0, 2]] = image.size[0] - boxes[:, [2, 0]]
+                    target["boxes"] = boxes
+        image = F.to_tensor(image)
+        return image, target
 
-@torch.no_grad()
-def evaluate_map(model, loader, device, desc="Eval"):
-    model.eval()
-    metric = MeanAveragePrecision(iou_type="bbox")
+def parse_yolo_data_yaml(yaml_path: Path):
+    data = yaml.safe_load(open(yaml_path))
+    names = data['names'] if isinstance(data['names'], list) else [data['names'][k] for k in sorted(data['names'])]
+    train_path = Path(data['train'])
+    val_path = Path(data.get('val') or data.get('valid'))
+    if not train_path.is_absolute():
+        train_path = yaml_path.parent / train_path
+    if not val_path.is_absolute():
+        val_path = yaml_path.parent / val_path
+    return names, train_path, val_path
 
-    for images, targets in tqdm(loader, desc=desc):
-        images = [img.to(device) for img in images]
-        outputs = model(images)
+def build_model(num_classes: int, pretrained=True, freeze=0):
+    model = fasterrcnn_resnet50_fpn(weights="DEFAULT" if pretrained else None)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes + 1)
+    if freeze and hasattr(model.backbone, 'body'):
+        for name, param in model.backbone.body.named_parameters():
+            if name.startswith(('conv1', 'bn1', 'layer1')):
+                param.requires_grad = False
+    return model
 
-        preds, gts = [], []
-        for out, tgt in zip(outputs, targets):
-            preds.append({
-                "boxes": out["boxes"].cpu(),
-                "scores": out["scores"].cpu(),
-                "labels": out["labels"].cpu(),
-            })
-            gts.append({
-                "boxes": tgt["boxes"].cpu(),
-                "labels": tgt["labels"].cpu(),
-            })
-        metric.update(preds, gts)
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
-    res = metric.compute()  # dict of tensors
-
-    # Scalars
-    scalar_keys = [
-        "map", "map_50", "map_75",
-        "map_small", "map_medium", "map_large",
-        "mar_1", "mar_10", "mar_100",
-        "mar_small", "mar_medium", "mar_large",
-    ]
-    out = {}
-    for k in scalar_keys:
-        if k in res and res[k].ndim == 0:
-            out[k] = float(res[k].item())
-
-    # Per-class arrays for saving/inspection
-    if "classes" in res:
-        out["classes"] = res["classes"].cpu().tolist()
-    if "precision" in res:
-        out["precision_per_class"] = res["precision"].cpu().tolist()
-    if "recall" in res:
-        out["recall_per_class"] = res["recall"].cpu().tolist()
-
-    main_map = float(res.get("map", torch.tensor(0.0)).item()) if "map" in res else 0.0
-    return main_map, out
-
-def train_one_epoch(model, loader, optimizer, device, scaler=None):
+def train_one_epoch(model, optimizer, data_loader, device, scaler=None):
     model.train()
-    avg_loss = 0.0
-    for images, targets in tqdm(loader, desc="Train"):
+    total_loss = 0.0
+    for images, targets in data_loader:
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
+        with torch.cuda.amp.autocast(enabled=(scaler is not None)):
+            losses = model(images, targets)
+            loss = sum(loss for loss in losses.values())
         optimizer.zero_grad(set_to_none=True)
-        if scaler is None:
-            loss_dict = model(images, targets)
-            loss = sum(loss for loss in loss_dict.values())
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            optimizer.step()
-        else:
-            with torch.cuda.amp.autocast(enabled=AMP):
-                loss_dict = model(images, targets)
-                loss = sum(loss for loss in loss_dict.values())
+        if scaler:
             scaler.scale(loss).backward()
-            nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             scaler.step(optimizer)
             scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(data_loader)
 
-        avg_loss = 0.9 * avg_loss + 0.1 * float(loss.item()) if avg_loss > 0 else float(loss.item())
-    return avg_loss
-
-# ============================================================
-# ---------------------- MAIN --------------------------------
-# ============================================================
+def evaluate_loss(model, data_loader, device):
+    model.train()
+    total = 0.0
+    with torch.no_grad():
+        for images, targets in data_loader:
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            losses = model(images, targets)
+            total += sum(loss for loss in losses.values()).item()
+    return total / len(data_loader)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', required=True, help='Path to YOLO dataset root or YAML')
+    parser.add_argument('--out', required=True, help='Output directory')
+    args = parser.parse_args()
+
     set_seed(SEED)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    data_path = Path(args.data)
 
-    # Datasets & loaders
-    train_ds = CocoDetectionTorchvision(TRAIN_IMG_DIR, TRAIN_JSON, train=True)
-    val_ds   = CocoDetectionTorchvision(VAL_IMG_DIR,   VAL_JSON,   train=False)
-    test_ds  = CocoDetectionTorchvision(TEST_IMG_DIR,  TEST_JSON,  train=False)
-
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                          num_workers=NUM_WORKERS, collate_fn=collate_fn, pin_memory=True)
-    val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                          num_workers=NUM_WORKERS, collate_fn=collate_fn, pin_memory=True)
-    test_dl  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False,
-                          num_workers=NUM_WORKERS, collate_fn=collate_fn, pin_memory=True)
-
-    # Model (pretrained) + optimizer + scheduler
-    model = create_model(train_ds.num_classes).to(DEVICE)
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY)
-
-    if USE_COSINE_LR:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    if data_path.suffix in {'.yaml', '.yml'}:
+        class_names, train_img_dir, val_img_dir = parse_yolo_data_yaml(data_path)
+        def labels_for(img_dir):
+            idx = list(img_dir.parts).index('images')
+            return Path(*img_dir.parts[:idx]) / 'labels' / Path(*img_dir.parts[idx+1:])
+        train_lbl, val_lbl = labels_for(train_img_dir), labels_for(val_img_dir)
     else:
-        milestones = [int(EPOCHS * 0.6), int(EPOCHS * 0.85)]
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1)
+        root = data_path
+        class_names = [str(i) for i in range(1)]
+        train_img_dir, train_lbl = root/'images/train', root/'labels/train'
+        val_img_dir, val_lbl = root/'images/val', root/'labels/val'
 
-    scaler = torch.cuda.amp.GradScaler(enabled=AMP)
+    train_ds = YoloDetectionDataset(train_img_dir, train_lbl, class_names, IMG_SIZE, True, COLOR_JITTER)
+    val_ds = YoloDetectionDataset(val_img_dir, val_lbl, class_names, IMG_SIZE, False)
+    train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True, num_workers=WORKERS, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=WORKERS, collate_fn=collate_fn)
 
-    # ---------- Load checkpoint logic ----------
-    start_epoch = 0
-    best_map = -1.0
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = build_model(len(class_names), PRETRAINED, FREEZE).to(device)
 
-    if LOAD_FROM:  # finetune from a base model (weights only)
-        print(f"[INFO] Loading base weights from: {LOAD_FROM}")
-        load_ckpt_flex(model, Path(LOAD_FROM), load_optimizer=False)
-    if RESUME_FROM:  # full resume (weights + optimizer + epoch)
-        print(f"[INFO] Resuming from: {RESUME_FROM}")
-        e, best = load_ckpt_flex(model, Path(RESUME_FROM), load_optimizer=True, optimizer=optimizer)
-        start_epoch = max(0, e + 1)
-        best_map = best
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = optim.SGD(params, lr=LR0, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True) if OPTIMIZER.upper() == 'SGD' else optim.AdamW(params, lr=LR0, weight_decay=WEIGHT_DECAY)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=LR0 * LRF)
+    scaler = torch.cuda.amp.GradScaler() if USE_AMP and device.type == 'cuda' else None
 
-    # ---------- Training loop ----------
-    best_map, best_epoch = -1.0, -1
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    best_val = float('inf')
+
+    # early stopping state
+    patience = EARLY_STOPPING_PATIENCE
+    min_delta = EARLY_STOPPING_MIN_DELTA
     epochs_no_improve = 0
 
-    for epoch in range(start_epoch, EPOCHS):
-        print(f"\nEpoch {epoch+1}/{EPOCHS}")
-        train_loss = train_one_epoch(model, train_dl, optimizer, DEVICE, scaler)
+    for epoch in range(1, EPOCHS+1):
+        tr_loss = train_one_epoch(model, optimizer, train_loader, device, scaler)
+        val_loss = evaluate_loss(model, val_loader, device)
         scheduler.step()
-        print(f"Avg Train Loss: {train_loss:.4f}")
+        print(f"Epoch {epoch}/{EPOCHS} - lr {optimizer.param_groups[0]['lr']:.6f} - train {tr_loss:.4f} - val {val_loss:.4f}")
 
-        if (epoch + 1) % EVAL_INTERVAL == 0:
-            val_map, _ = evaluate_map(model, val_dl, DEVICE, desc="Eval (val)")
-            print(f"Val mAP: {val_map:.4f}")
+        # check improvement
+        if val_loss < best_val - min_delta:
+            best_val = val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), out_dir / 'best.pt')
+        else:
+            epochs_no_improve += 1
 
-            # always save last
-            save_ckpt(OUT_DIR / "last.pth", model, optimizer, epoch, best_map)
+        torch.save(model.state_dict(), out_dir / 'last.pt')
 
-            # improvement check
-            if val_map > (best_map + EARLY_STOP_MIN_DELTA):
-                best_map, best_epoch = val_map, epoch
-                save_ckpt(OUT_DIR / "best.pth", model, optimizer, epoch, best_map)
-                print("-> Best model updated.")
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-                print(f"(no improvement for {epochs_no_improve}/{EARLY_STOP_PATIENCE})")
+        if epochs_no_improve >= patience:
+            print(f"Early stopping triggered (no improvement for {patience} epochs). Stopping at epoch {epoch}.")
+            break
 
-                # early stop condition
-                if EARLY_STOP_PATIENCE > 0 and epochs_no_improve >= EARLY_STOP_PATIENCE:
-                    print(f"Early stopping triggered (patience={EARLY_STOP_PATIENCE}).")
-                    break
+    print(f"Training done. Best val loss: {best_val:.4f}")
 
-    print(f"Training done. Best val mAP: {best_map:.4f}" + (f" at epoch {best_epoch}." if best_epoch >= 0 else ""))
-
-
-    # ---------- Final test evaluation ----------
-    print("\n[Final] Evaluating BEST checkpoint on TEST set…")
-    ckpt = torch.load(str(OUT_DIR / "best.pth"), map_location="cpu")
-    model.load_state_dict(ckpt["model"])
-    test_map, test_detail = evaluate_map(model, test_dl, DEVICE, desc="Eval (test)")
-    print(f"TEST mAP: {test_map:.4f}")
-
-    # Save metrics
-    (OUT_DIR / "metrics").mkdir(parents=True, exist_ok=True)
-    with open(OUT_DIR / "metrics/test_metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"test_map": test_map, **test_detail}, f, indent=2)
-    print("Saved:", OUT_DIR / "metrics/test_metrics.json")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

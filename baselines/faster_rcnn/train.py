@@ -27,6 +27,7 @@ from torchvision import transforms
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from PIL import Image
+from torchvision.models.detection.rpn import AnchorGenerator, RPNHead
 
 # ==============================
 # CONFIG — edit these variables
@@ -40,7 +41,7 @@ LR0: float = 0.0001
 MOMENTUM: float = 0.937
 WEIGHT_DECAY: float = 5e-4
 LRF: float = 0.05
-FREEZE: int = 1
+FREEZE: int = 0
 PRETRAINED: bool = True
 USE_AMP: bool = True
 COLOR_JITTER: bool = True
@@ -271,28 +272,66 @@ def parse_yolo_data_yaml(yaml_path: Path):
     return names, train_path, val_path
 
 def build_model(num_classes: int, pretrained=True, freeze=0):
+    # Build model
     model = fasterrcnn_resnet50_fpn(weights="DEFAULT" if pretrained else None)
 
-    # Replace the classification head for your dataset
+    # Replace the classifier
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes + 1)
 
-    # Progressive freezing of backbone layers
+    # Better anchors. add smaller anchors + more ratios
+    # Per FPN level (P3..P7 effectively).
+    sizes = ((16,), (32,), (64,), (128,), (256,))
+    ratios = (0.5, 1.0, 2.0, 3.0)
+    ag = AnchorGenerator(sizes=sizes, aspect_ratios=(ratios,)*5)
+    model.rpn.anchor_generator = ag
+
+    # Rebuild RPN head to match new num_anchors_per_location
+    out_channels = model.backbone.out_channels  # usually 256
+    num_anchors = ag.num_anchors_per_location()[0]  # e.g., 4 ratios => 4
+    model.rpn.head = RPNHead(out_channels, num_anchors)
+
+    # RPN sampling / thresholds (more recall on tiny data)
+    model.rpn.batch_size_per_image = 512
+    model.rpn.positive_fraction   = 0.5       # 0.5 helps few-shot
+    model.rpn.score_thresh        = 0.0
+    model.rpn.nms_thresh          = 0.7
+    model.rpn.pre_nms_top_n_train  = 4000     # more proposals while training
+    model.rpn.pre_nms_top_n_test   = 2000
+    model.rpn.post_nms_top_n_train = 2000
+    model.rpn.post_nms_top_n_test  = 1000
+    model.rpn_fg_iou_thresh       = 0.5
+    model.rpn_bg_iou_thresh       = 0.3
+
+    # ROI head sampler (get more positives to learn faster)
+    model.roi_heads.batch_size_per_image = 512
+    model.roi_heads.positive_fraction    = 0.5   # default 0.25 increase to learn faster in low-data
+    model.roi_heads.nms_thresh           = 0.5
+    model.roi_heads.score_thresh         = 0.0
+    model.roi_heads.detections_per_img   = 300
+
+    #Progressive freezing
     if freeze and hasattr(model.backbone, 'body'):
         freeze_map = {
-            1: ('conv1', 'bn1', 'layer1'),                               # very shallow layers
-            2: ('conv1', 'bn1', 'layer1', 'layer2'),                     # freeze half of backbone
-            3: ('conv1', 'bn1', 'layer1', 'layer2', 'layer3'),           # freeze most of backbone
-            4: ('conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4')  # freeze entire backbone
+            1: ('conv1','bn1','layer1'),
+            2: ('conv1','bn1','layer1','layer2'),
+            3: ('conv1','bn1','layer1','layer2','layer3'),
+            4: ('conv1','bn1','layer1','layer2','layer3','layer4'),
         }
         to_freeze = freeze_map.get(freeze, ())
+        for name, p in model.backbone.body.named_parameters():
+            if any(name.startswith(pref) for pref in to_freeze):
+                p.requires_grad = False
 
-        for name, param in model.backbone.body.named_parameters():
-            # check if parameter name starts with any of the frozen layer prefixes
-            if any(name.startswith(prefix) for prefix in to_freeze):
-                param.requires_grad = False
+    # initialize cls bias ~ log(p/(1-p)) with small foreground prior p
+    with torch.no_grad():
+        cls_score = model.roi_heads.box_predictor.cls_score
+        p = 0.01
+        bias = torch.full_like(cls_score.bias, fill_value=torch.log(torch.tensor(p/(1-p))))
+        cls_score.bias.copy_(bias)
 
     return model
+
 
 def collate_fn(batch):
     return tuple(zip(*batch))

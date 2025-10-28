@@ -36,11 +36,11 @@ BATCH: int = 4
 IMG_SIZE: int = 1024
 WORKERS: int = 4
 OPTIMIZER: str = "SGD"
-LR0: float = 0.001
+LR0: float = 0.0001
 MOMENTUM: float = 0.937
 WEIGHT_DECAY: float = 5e-4
 LRF: float = 0.05
-FREEZE: int = 0
+FREEZE: int = 3
 PRETRAINED: bool = True
 USE_AMP: bool = True
 COLOR_JITTER: bool = False
@@ -139,12 +139,26 @@ def parse_yolo_data_yaml(yaml_path: Path):
 
 def build_model(num_classes: int, pretrained=True, freeze=0):
     model = fasterrcnn_resnet50_fpn(weights="DEFAULT" if pretrained else None)
+
+    # Replace the classification head for your dataset
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes + 1)
+
+    # Progressive freezing of backbone layers
     if freeze and hasattr(model.backbone, 'body'):
+        freeze_map = {
+            1: ('conv1', 'bn1', 'layer1'),                               # very shallow layers
+            2: ('conv1', 'bn1', 'layer1', 'layer2'),                     # freeze half of backbone
+            3: ('conv1', 'bn1', 'layer1', 'layer2', 'layer3'),           # freeze most of backbone
+            4: ('conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4')  # freeze entire backbone
+        }
+        to_freeze = freeze_map.get(freeze, ())
+
         for name, param in model.backbone.body.named_parameters():
-            if name.startswith(('conv1', 'bn1', 'layer1')):
+            # check if parameter name starts with any of the frozen layer prefixes
+            if any(name.startswith(prefix) for prefix in to_freeze):
                 param.requires_grad = False
+
     return model
 
 def collate_fn(batch):
@@ -210,9 +224,31 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = build_model(len(class_names), PRETRAINED, FREEZE).to(device)
 
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.SGD(params, lr=LR0, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True) if OPTIMIZER.upper() == 'SGD' else optim.AdamW(params, lr=LR0, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=LR0 * LRF)
+    def is_head(n): return n.startswith('roi_heads.box_predictor')
+    def is_rpn(n):  return n.startswith('rpn')
+    def is_fpn(n):  return n.startswith('backbone.fpn')
+
+    lr_backbone = 5e-4   # keep small
+    lr_heads    = 5e-3   # much larger so it actually learns
+
+    backbone_params, fpn_rpn_params, head_params = [], [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad: 
+            continue
+        if is_head(n): head_params.append(p)
+        elif is_rpn(n) or is_fpn(n): fpn_rpn_params.append(p)
+        else: backbone_params.append(p)
+
+    optimizer = optim.SGD([
+        {"params": backbone_params, "lr": lr_backbone},
+        {"params": fpn_rpn_params,  "lr": lr_backbone},
+        {"params": head_params,     "lr": lr_heads},
+    ], momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True)
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=min(lr_backbone, lr_heads) * LRF
+    )
+
     scaler = torch.cuda.amp.GradScaler() if USE_AMP and device.type == 'cuda' else None
 
     out_dir = Path(args.out)

@@ -40,15 +40,28 @@ LR0: float = 0.0001
 MOMENTUM: float = 0.937
 WEIGHT_DECAY: float = 5e-4
 LRF: float = 0.05
-FREEZE: int = 3
+FREEZE: int = 1
 PRETRAINED: bool = True
 USE_AMP: bool = True
-COLOR_JITTER: bool = False
+COLOR_JITTER: bool = True
 SEED: int = 42
 # Early stopping
 EARLY_STOPPING_PATIENCE: int = 20
 EARLY_STOPPING_MIN_DELTA: float = 1e-4
 # ==============================
+# --- Augmentation knobs ---
+STRONG_AUG: bool = True          # master switch
+SCALE_JITTER: tuple = (0.8, 1.2) # uniform scale factor range
+GRAYSCALE_P: float = 0.1
+AUTOCONTRAST_P: float = 0.2
+SHARPNESS_P: float = 0.2
+BLUR_P: float = 0.15              # Gaussian blur probability
+CUTOUT_P: float = 0.5             # do N cutout holes with this prob
+CUTOUT_HOLES: int = 8
+CUTOUT_RATIO: tuple = (0.02, 0.10)  # area ratio per hole w.r.t image
+GAUSS_NOISE_P: float = 0.3
+GAUSS_NOISE_STD: float = 0.02     # relative to [0,1] range
+
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -71,19 +84,26 @@ class YoloDetectionDataset(Dataset):
         self.max_size = max_size
         self.train = train
         self.enable_color_jitter = enable_color_jitter
+
+        # existing light augs
         self.flip = transforms.RandomHorizontalFlip(0.5) if train else None
         self.color = transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02) if (train and enable_color_jitter) else None
+
+        # stateless PIL ops we'll call conditionally
+        self.autocontrast = transforms.functional.autocontrast
+        self.adjust_sharpness = transforms.functional.adjust_sharpness
+        self.gaussian_blur = transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+        self.to_tensor = F.to_tensor
 
     def __len__(self):
         return len(self.images)
 
     def _load_targets(self, img_path: Path, W: int, H: int):
-        # preserve subfolder structure: map images/<subdirs>/img.jpg -> labels/<subdirs>/img.txt
+        # (unchanged from your version)
         try:
             rel = img_path.relative_to(self.images_dir)
             label_path = (self.labels_dir / rel).with_suffix('.txt')
         except Exception:
-            # fallback: same-dir label file or labels root with filename
             label_path = self.labels_dir / img_path.with_suffix('.txt').name
         boxes, raw_labels = [], []
         if label_path.exists():
@@ -94,12 +114,10 @@ class YoloDetectionDataset(Dataset):
                 cls, xc, yc, w, h = int(parts[0]), *map(float, parts[1:])
                 boxes.append(yolo_denorm_to_xyxy(xc, yc, w, h, W, H))
                 raw_labels.append(cls)
-        # Normalize class indices: detect 1-based files and convert to 0-based
         labels = []
         if raw_labels:
             max_lbl = max(raw_labels)
             if max_lbl >= len(self.class_names):
-                # assume 1-based -> convert all to 0-based
                 raw_labels = [r - 1 for r in raw_labels]
             labels = [r + 1 for r in raw_labels]  # torchvision expects 1..C (0 is background)
         boxes = torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32)
@@ -108,23 +126,138 @@ class YoloDetectionDataset(Dataset):
         iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
         return {"boxes": boxes, "labels": labels, "area": area, "iscrowd": iscrowd}
 
+    # ---------- helpers for strong aug ----------
+    def _scale_jitter(self, image: Image.Image, target, s_min=0.8, s_max=1.2):
+        W, H = image.size
+        s = random.uniform(s_min, s_max)
+        if abs(s - 1.0) < 1e-3:
+            return image, target
+        newW, newH = max(1, int(W * s)), max(1, int(H * s))
+        image = image.resize((newW, newH), Image.BILINEAR)
+        if target["boxes"].numel() > 0:
+            boxes = target["boxes"].clone()
+            boxes[:, [0, 2]] *= s
+            boxes[:, [1, 3]] *= s
+            # clip to new image size
+            boxes[:, 0::2] = boxes[:, 0::2].clamp(0, newW)
+            boxes[:, 1::2] = boxes[:, 1::2].clamp(0, newH)
+            target["boxes"] = boxes
+            # recompute area
+            target["area"] = (boxes[:, 2] - boxes[:, 0]).clamp(min=0) * (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
+        return image, target
+
+    def _maybe_gray(self, image: Image.Image):
+        if random.random() < GRAYSCALE_P:
+            return transforms.functional.to_grayscale(image, num_output_channels=3)
+        return image
+
+    def _maybe_autocontrast(self, image: Image.Image):
+        if random.random() < AUTOCONTRAST_P:
+            return self.autocontrast(image)
+        return image
+
+    def _maybe_sharpness(self, image: Image.Image):
+        if random.random() < SHARPNESS_P:
+            factor = random.uniform(0.5, 2.0)
+            return self.adjust_sharpness(image, factor)
+        return image
+
+    def _maybe_blur(self, image: Image.Image):
+        if random.random() < BLUR_P:
+            return self.gaussian_blur(image)
+        return image
+
+    def _apply_cutout(self, image: torch.Tensor):
+        # image is tensor in [0,1], shape [C,H,W]
+        if random.random() >= CUTOUT_P:
+            return image
+        C, H, W = image.shape
+        holes = CUTOUT_HOLES
+        min_r, max_r = CUTOUT_RATIO
+        for _ in range(holes):
+            area = random.uniform(min_r, max_r) * H * W
+            aspect = random.uniform(0.5, 2.0)
+            h = int((area / aspect) ** 0.5)
+            w = int(area / max(h, 1))
+            if h <= 0 or w <= 0:
+                continue
+            y = random.randint(0, max(H - h, 0))
+            x = random.randint(0, max(W - w, 0))
+            image[:, y:y+h, x:x+w] = 0.0  # black rectangle
+        return image
+    # -------------------------------------------
+
     def __getitem__(self, idx: int):
         img_path = self.images[idx]
         image = Image.open(img_path).convert('RGB')
         W, H = image.size
         target = self._load_targets(img_path, W, H)
         target["image_id"] = torch.tensor([idx])
-        if self.train and self.color:
-            image = self.color(image)
-        if self.train and self.flip:
-            if random.random() < 0.5:
-                image = F.hflip(image)
-                if target["boxes"].numel() > 0:
-                    boxes = target["boxes"].clone()
-                    boxes[:, [0, 2]] = image.size[0] - boxes[:, [2, 0]]
-                    target["boxes"] = boxes
-        image = F.to_tensor(image)
+
+        if not self.train:
+            return F.to_tensor(image), target
+
+        # --- STRONG AUG chain (PIL domain, bbox-safe) ---
+        if STRONG_AUG:
+            # photometric
+            image = self._maybe_autocontrast(image)
+            image = self._maybe_sharpness(image)
+            if self.enable_color_jitter:  # respect your toggle
+                image = self.color(image)  # existing jitter
+            image = self._maybe_gray(image)
+            image = self._maybe_blur(image)
+
+            # geometric: scale jitter with bbox rescale
+            image, target = self._scale_jitter(
+                image, target, s_min=SCALE_JITTER[0], s_max=SCALE_JITTER[1]
+            )
+            target = self._clip_and_filter(target, *image.size)  # (W,H)
+
+        # existing H-flip (bbox-correct)
+        if self.flip and random.random() < 0.5:
+            image = F.hflip(image)
+            if target["boxes"].numel() > 0:
+                boxes = target["boxes"].clone()
+                newW = image.size[0]
+                boxes[:, [0, 2]] = newW - boxes[:, [2, 0]]
+                target["boxes"] = boxes
+            target = self._clip_and_filter(target, *image.size)  # (W,H)
+
+        # to tensor
+        image = self.to_tensor(image)
+
+        # tensor-domain augs
+        if STRONG_AUG:
+            # light Gaussian noise
+            if random.random() < GAUSS_NOISE_P:
+                noise = torch.randn_like(image) * GAUSS_NOISE_STD
+                image = (image + noise).clamp(0.0, 1.0)
+            # cutout occlusion
+            image = self._apply_cutout(image)
+
         return image, target
+
+    def _clip_and_filter(self, target, W: int, H: int, eps: float = 1e-3):
+        if target["boxes"].numel() == 0:
+            return target
+        boxes = target["boxes"]
+
+        # clip to (almost) inside image to avoid 0-size after clamp
+        boxes[:, 0::2] = boxes[:, 0::2].clamp(0, W - eps)  # x1,x2
+        boxes[:, 1::2] = boxes[:, 1::2].clamp(0, H - eps)  # y1,y2
+
+        w = boxes[:, 2] - boxes[:, 0]
+        h = boxes[:, 3] - boxes[:, 1]
+        keep = (w > 0) & (h > 0)
+
+        target["boxes"]  = boxes[keep]
+        target["labels"] = target["labels"][keep]
+        target["iscrowd"] = target["iscrowd"][keep]
+        if "area" in target:
+            target["area"] = (target["boxes"][:, 2] - target["boxes"][:, 0]).clamp(min=0) * \
+                            (target["boxes"][:, 3] - target["boxes"][:, 1]).clamp(min=0)
+        return target
+
 
 def parse_yolo_data_yaml(yaml_path: Path):
     data = yaml.safe_load(open(yaml_path))

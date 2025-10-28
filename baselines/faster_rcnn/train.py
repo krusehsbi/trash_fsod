@@ -400,8 +400,8 @@ def main():
     def is_rpn(n):  return n.startswith('rpn')
     def is_fpn(n):  return n.startswith('backbone.fpn')
 
-    lr_backbone = 5e-4   # keep small
-    lr_heads    = 5e-3   # much larger so it actually learns
+    lr_backbone = 1e-4   # keep small
+    lr_heads    = 1e-3   # much larger so it actually learns
 
     backbone_params, fpn_rpn_params, head_params = [], [], []
     for n, p in model.named_parameters():

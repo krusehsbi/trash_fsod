@@ -1,5 +1,6 @@
 *.pt
 runs/
+runs_rtdetr/
 outputs_frcnn/
 datasets/
 clip_embeddings_clustered_clusters/

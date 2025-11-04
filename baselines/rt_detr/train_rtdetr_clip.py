@@ -244,7 +244,6 @@ def main():
     templates = cfg.get("text_head", {}).get("templates", [
         "a photo of a {}.",
         "an image of a {}.",
-        "a {} on a table.",
         "a close-up photo of a {}.",
         "a cropped photo of a {}."
     ])
@@ -313,7 +312,8 @@ def main():
         name=cfg.get("name"),
         rect=cfg.get("rect"),
         plots=cfg.get("plots"),
-        verbose=cfg.get("verbose")
+        verbose=cfg.get("verbose"),
+        patience=cfg.get("patience")
     )
 
     print("[INFO] Starting training ...")

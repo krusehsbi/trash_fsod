@@ -1,0 +1,60 @@
+# rtdetr training config for few-shot + synthetic (k+g) datasets
+# ========= Model & Data =========
+model: rtdetr-l.pt                     # oder rtdetr-x.pt bei mehr VRAM (Decoder-Dim beachten)
+data: ../../datasets/k10_g10_cluster/dataset.yaml          # enthält names: [...] in der richtigen Klassenreihenfolge
+device: ""                             # "", "cuda", "cpu"
+project: runs_rtdetr
+name: rtdetr_k10_g10_tg_train
+exist_ok: false
+epochs: 300                # short fine-tuning run
+batch: 8                   # small batch works better for low-data
+imgsz: 1024
+workers: 4
+optimizer: SGD             # SGD usually generalizes better in low-data regimes
+lr0: 0.001                 
+lrf: 0.05                  # cosine final LR fraction
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3
+patience: 20
+
+# -------------------
+# Data augmentation
+# -------------------
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 5.0
+translate: 0.1
+scale: 0.3
+shear: 2.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+mosaic: 0.7               # keep mosaic but reduce for stability
+mixup: 0.1
+copy_paste: 0.05
+amp: true
+plots: true
+save_json: true                         # COCO-style mAP falls annotes im COCO-Format
+
+# -------------------
+# Regularization tricks
+# -------------------
+label_smoothing: 0.0
+close_mosaic: 50          # disable mosaic in final 10 epochs
+cache: false              # disable caching to avoid memory spikes
+seed: 42
+save_period: 10
+
+# -------------------
+# Fine-tuning & backbone
+# -------------------
+freeze: 0
+pretrained: true
+resume: false
+
+adapter_learnable: true
+scale_init: 10.0
+class_gain: true
+model_dim: 256                # 256 for rtdetr-l, 384 for rtdetr-x

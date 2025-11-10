@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import yaml
 
 # Create a YOLO-World model
-model = YOLO("yolov8s-world.pt")  # or select yolov8m/l-world.pt for different sizes
+model = YOLO("yolov8l-worldv2.pt")  # or select yolov8m/l-world.pt for different sizes
 
 with open('../../datasets/1shot/dataset.yaml', 'r') as f:
     data = yaml.safe_load(f)

@@ -25,7 +25,9 @@
 
 ## Results
 
-### YOLOv11
+### 
+
+yolov11 full training: 0.109/0.084
 
 **mAP50:**
 |      | k=1  | k=3  | k=5  | k=10 | k=30 |
@@ -102,6 +104,8 @@
 ________________________
 
 ### RT-DETR (clustered)
+
+rt-detr full training: 0.141/0.106
 
 **mAP50:**
 |      | k=1   | k=3   | k=5  | k=10 | k=30 |

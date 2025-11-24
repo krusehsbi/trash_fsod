@@ -6,7 +6,7 @@
 task: detect
 mode: train
 model: rtdetr-l.pt           # COCO-pretrained (or yolo11s.pt if VRAM tight)
-data: ../../datasets/synthetick30_split/dataset.yaml
+data: ../../datasets/synthetic_splitsdxl/dataset.yaml
 epochs: 300                # short fine-tuning run
 batch: 8                   # small batch works better for low-data
 imgsz: 1024
@@ -55,6 +55,6 @@ resume: false
 # -------------------
 # Logging / visualization
 # -------------------
-project: runs/basek30
-name: rtdetr_basek30
+project: runs/basesdxl
+name: rtdetr_basesdxl
 exist_ok: true

@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
 
 # Data
-k_values = [1, 5, 10, 30]
+k_values = [1, 3, 5, 10, 30]
 
-yolo = [0.108, 0.138, 0.166, 0.213]
-rtdetr = [0.142, 0.143, 0.202, 0.283]
+yolo = [0.108, 0.111, 0.138, 0.166, 0.213]
+rtdetr = [0.142, 0.138, 0.143, 0.202, 0.283]
 
 # Create evenly spaced positions for x-axis
 x = range(len(k_values))   # [0,1,2,3]

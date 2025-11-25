@@ -6,7 +6,7 @@
 task: detect
 mode: train
 model: runs/basesdxl/rtdetr_basesdxl/weights/best.pt           # COCO-pretrained (or yolo11s.pt if VRAM tight)
-data: ../../datasets/1shot/dataset.yaml
+data: ../../datasets/1shot_diffusion/dataset.yaml
 epochs: 300                # short fine-tuning run
 batch: 8                   # small batch works better for low-data
 imgsz: 1024

@@ -46,13 +46,13 @@ save_period: 10
 # -------------------
 # Fine-tuning & backbone
 # -------------------
-freeze: -1                # freeze first 10 layers for early stability
+freeze: 10                # freeze first 10 layers for early stability
 pretrained: true
 resume: false
 
 # -------------------
 # Logging / visualization
 # -------------------
-project: runs/base
-name: yolov11_base
+project: runs/base_test
+name: yolov11_base_test
 exist_ok: true

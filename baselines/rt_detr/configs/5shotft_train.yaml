@@ -5,7 +5,7 @@
 # -------------------
 task: detect
 mode: train
-model: runs/base/rtdetr_base/weights/best.pt           # COCO-pretrained (or yolo11s.pt if VRAM tight)
+model: runs/base_test/rtdetr_base_test/weights/best.pt           # COCO-pretrained (or yolo11s.pt if VRAM tight)
 data: ../../datasets/5shot/dataset.yaml
 epochs: 300                # short fine-tuning run
 batch: 8                   # small batch works better for low-data
@@ -48,13 +48,13 @@ save_period: 10
 # -------------------
 # Fine-tuning & backbone
 # -------------------
-freeze: -1
+freeze: 10
 pretrained: true
 resume: false
 
 # -------------------
 # Logging / visualization
 # -------------------
-project: runs/5shotft
-name: rtdetr_5shotft
+project: runs/5shotft_test
+name: rtdetr_5shotft_test
 exist_ok: true

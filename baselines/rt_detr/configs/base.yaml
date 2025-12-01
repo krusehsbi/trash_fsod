@@ -48,13 +48,13 @@ save_period: 10
 # -------------------
 # Fine-tuning & backbone
 # -------------------
-freeze: -1
+freeze: 10
 pretrained: true
 resume: false
 
 # -------------------
 # Logging / visualization
 # -------------------
-project: runs/base
-name: rtdetr_base
+project: runs/base_test
+name: rtdetr_base_test
 exist_ok: true

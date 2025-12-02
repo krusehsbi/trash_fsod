@@ -48,7 +48,7 @@ save_period: 10
 # -------------------
 # Fine-tuning & backbone
 # -------------------
-freeze: -1
+freeze: 10
 pretrained: true
 resume: false
 

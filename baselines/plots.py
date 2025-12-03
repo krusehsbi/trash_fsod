@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 k_values = [1, 3, 5, 10, 30]
 
 yolo = [0.108, 0.111, 0.138, 0.166, 0.213]
-rtdetr = [0.142, 0.138, 0.143, 0.202, 0.283]
-rtdetr_sdxl = [0.131, 0.155, 0.162, 0.207, 0.214]
+rtdetr = [0.214, 0.219, 0.243, 0.292, 0.325]
+rtdetr_sdxl = [0.203, 0.239, 0.24, 0.271, 0.308]
 
 # Create evenly spaced positions for x-axis
 x = range(len(k_values))   # [0,1,2,3]
